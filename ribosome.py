@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from __future__ import print_function
+from __future__ import print_function, division
 
 #
 # Copyright (c) 2015 Ali Zaidi  All rights reserved.
@@ -24,54 +24,20 @@ from __future__ import print_function
 # IN THE SOFTWARE.
 #
 
-####################
-# Helper functions #
-####################
+import os
+import re
+import sys
+import ast, _ast
+import inspect
+import unicodedata
 
-def __line__():
-    """Return the line number from which this functions got called.
-    http://stackoverflow.com/q/6810999"""
-    import inspect
-    frame = inspect.stack()[1][0]
-    return inspect.getframeinfo(frame).lineno
+line = lambda: inspect.currentframe().f_back.f_lineno
+templ = lambda s, level=1: s.format(**inspect.stack()[level][0].f_locals)
 
 
 #################
 # Prologue code #
 #################
-
-PROLOGUE_LINE = __line__()
-PROLOGUE = """#!/usr/bin/env python
-
-#
-# The initial part of this file belongs to the ribosome project.
-#
-# Copyright (c) 2015 Ali Zaidi  All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom
-# the Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included
-# in all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-# IN THE SOFTWARE.
-#
-
-from __future__ import print_function, division
-
-import sys
-import re
-
 
 class Block:
     # Block represents a rectangular area of text.
@@ -127,7 +93,7 @@ class Block:
                 ws = len(l) - len(l.lstrip())
                 l = '\t' * (ws // tabsize) + ' ' * (ws % tabsize) + l.lstrip()
             # Write an individual line to the output file.
-            out.write(l + '\\n')
+            out.write(l+'\n')
 
     # Returns offset of the last line in block
     def last_offset(self):
@@ -138,7 +104,6 @@ class Block:
     _tabsize = 0
 
     # The output file, or, alternatively, stdout.
-    outisafile = False
     out = sys.stdout
 
     # This is ribosome call stack. At each level there is a list of
@@ -149,7 +114,6 @@ class Block:
     @staticmethod
     def output(filename):
         Block.close()
-        Block.outisafile = True
         Block.out = open(filename, "w")
     
     # Redirects output to the specified file.
@@ -157,14 +121,12 @@ class Block:
     @staticmethod
     def append(filename):
         Block.close()
-        Block.outisafile = True
         Block.out = open(filename, "a")
 
     # Redirect output to the stdout.
     @staticmethod
     def stdout():
         Block.close()
-        Block.outisafile = False
         Block.out = sys.stdout
 
     # Sets the size of the tab
@@ -178,11 +140,12 @@ class Block:
         for b in Block.stack[-1]:
             b.write(Block.out, Block._tabsize)
         Block.stack = [[]]
-        if Block.outisafile: Block.out.close()
+        if Block.out is not sys.stdout:
+            Block.out.close()
 
     # Adds one . line from the DNA file.
     @staticmethod
-    def add(line, bind):
+    def add(line, bind=None):
 
         # If there is no previous line, add one.
         if(len(Block.stack[-1]) == 0):
@@ -239,7 +202,7 @@ class Block:
             idx = i+2 if level == 0 else i+3
             expr = line[idx:j]
             Block.stack.append([])
-            val = eval(expr, bind)
+            val = eval(expr, globals(), bind or inspect.currentframe().f_back.f_locals)
             top = Block.stack.pop()
             if len(top) == 0:
                 val = Block(str(val))
@@ -253,258 +216,154 @@ class Block:
     
     # Adds newline followed by one . line from the DNA file.
     @staticmethod
-    def dot(line, bind):
+    def dot(line, bind=None):
         Block.stack[-1].append(Block(''))
-        Block.add(line, bind)
+        Block.add(line, bind or inspect.currentframe().f_back.f_locals)
 
     # Adds newline followed by leading whitespaces copied from the previous line
     # and one line from the DNA file.
     @staticmethod
-    def align(line, bind):
+    def align(line, bind=None):
         if len(Block.stack[-1]) == 0:
             n = 0
         else:
             n = Block.stack[-1][-1].last_offset()
         Block.stack[-1].append(Block(''))
         Block.add(' ' * n, None)
-        Block.add(line, bind)
+        Block.add(line, bind or inspect.currentframe().f_back.f_locals)
 
-    # Report an error that happened when executing RNA file.
-    @staticmethod
-    def rethrow(e, rnafile, linemap):
-        import traceback
-        exc = traceback.format_exc()
-        ls = exc.splitlines()[1:-1]
-        for i, l in enumerate(ls):
-            l = l.strip()
-            if l.startswith('File "<%s>"' % rnafile):
-                num = int(l.split(',')[1].replace('line', ''))
-                for j, m in enumerate(linemap):
-                    if m[0] == None or m[0] > num: break
-                j -= 1
-                num = num - linemap[j][0] + linemap[j][2]
-                ts = l/split(',')
-                l = ', '.join(['File "<%s>"' % linemap[j][1], 
-                               'line %d' % num, 
-                               ts[-1]])
-                print(l)
-        sys.exit(1)
+
+_separate_state = {}
+def separate(sep, sid, add):
+    global _separate_state
+    if not _separate_state.get(sid):
+        _separate_state[sid] = True
+    else:
+        add(sep)
 
             
-# Escape sequence for @
-at = '@'
+def include(file_or_name, warnctx=None, glo=None):
+    caller_f = inspect.currentframe().f_back
+    filename = caller_f.f_locals['filename']
+    lineno = caller_f.f_lineno
+    def newwarnctx():
+        if warnctx:
+            warnctx(s)
+        print('At {}:{}'.format(filename, lineno), file=sys.stderr)
+    includefile = open(file_or_name, 'r') if type(file_or_name) is str else file_or_name
+    glo = glo or caller_f.f_locals['glo'] #FIXME dirty hack
+    with includefile as f:
+        tree = parse_lines(includefile.name, includefile.readlines(), newwarnctx)
+        code = compile(tree, includefile.name, 'exec')
+        exec(code, glo, inspect.currentframe().f_back.f_locals)
 
-# Escape sequence for &
-amp = '&'
+def parse_lines(filename, lines, warnctx):
+    def warn(s):
+        # We are not using nonlocal here for python2 compatibility
+        caller_f = inspect.currentframe().f_back
+        filename = caller_f.f_locals['filename']
+        lineno = caller_f.f_lineno
+        rawline = caller_f.f_locals['rawline']
+        warnctx()
+        print('From {}:{}'.format(__file__, inspect.currentframe().f_back.f_lineno), file=sys.stderr)
+        print(templ(s, 2), file=sys.stderr)
+        print('> '+rawline, file=sys.stderr)
 
-# Escape sequence for /
+    code = []
+    for lineno,rawline in enumerate(lines):
+        indent,     dot,     shortcmd,    line,   rspace,     dollar = re.match(
+        r'^([\s]*)'+r'(\.?)'+r'(/[+=!])?'+r'(.*?)'+r'([\s]*?)'+r'(\$?)\n?$', rawline).groups()
+
+        # @alixedi - Now that we are doing this in Python, we must have some way
+        # of dealing with indentation - for instance, this does not work:
+        # for i in [1, 2, 3]:
+        # .    @{i}
+        # Neither does this work:
+        # for i in [1, 2, 3]:
+        #     .@{i}
+        # I want to be able to support the former.
+
+        if rspace and not dollar:
+            warn('Trailing space in line not dollar-terminated')
+
+        if '\t' in rawline:
+            # Tabs may cause issues with python's indentation processing
+            warn('Line contains tabs. Consider using spaces instead.')
+
+        if not dot:
+            code.append(rawline)
+            continue
+
+        if not shortcmd:
+            cmd, args = 'dot', repr(line)
+        elif shortcmd == '/+': # Append the line to the previous line.
+            cmd, args = 'add', repr(line)
+        elif shortcmd == '/=': # /= Align the line with the previous line.
+            cmd, args = 'align', repr(line)
+        else:
+            m = re.match(r'(^[0-9A-Za-z_]+)\((.*)\)$', line)
+            if not m:
+                warn('Invalid command syntax. Expected: /!command(arg, etc)')
+                code.append('# Invalid command syntax: {}'.format(rawline))
+                continue
+            cmd, args = m.groups()
+        code.append(templ('{indent}{cmd}({args})'))
+
+    tree = ast.parse('\n'.join(code), filename)
+
+    # Fix up generated AST for "separate" commands
+    # from _ast import * does not work in python2
+    done = []
+    for node in ast.walk(tree):
+        for val in node.__dict__.values():
+            if type(val) is list:
+                indices = [i for i,e in enumerate(val) if
+                        type(e) is _ast.Expr and
+                        type(e.value) is _ast.Call and
+                        type(e.value.func) is _ast.Name and
+                        e.value.func.id == 'separate']
+                for idx in reversed(indices):
+                    sepcall, loop = val[idx], val[idx+1]
+                    if sepcall in done:
+                        continue #FIXME dirty hack
+                    if type(loop) not in (_ast.For, _ast.While, _ast.FunctionDef):
+                        warn('"separate" command must be followed by loop or function definition.')
+                        continue
+                    sepcall.value.args.append(ast.Str('{}:{}'.format(filename, idx)))
+                    sepcall.value.args.append(ast.Name('add', ast.Load()))
+                    ast.fix_missing_locations(sepcall)
+                    loop.body = [sepcall] + loop.body
+                    done.append(sepcall)
+                    del val[idx]
+    return tree
+
+# Escape sequences
+at    = '@'
+amp   = '&'
 slash = '/'
+
+def runfile(f):
+    glo = globals().copy()
+    glo.update({
+        'output':  Block.output,
+        'append':  Block.append,
+        'stdout':  Block.stdout,
+        'tabsize': Block.tabsize,
+        'close':   Block.close,
+        'add':     Block.add,
+        'dot':     Block.dot,
+        'align':   Block.align})
     
+    filename = '<ribosome>'
+    lineno = 0
+    include(f, glo=glo)
+    Block.close()
 
-"""
-
-import os
-import sys
-import argparse
-import re
-
-# Set up the arguments parser.
-parser = argparse.ArgumentParser(prog="ribosome code generator, version 1.16")
-parser.add_argument('dna', type=argparse.FileType('r'))
-parser.add_argument('--rna', action='store_true')
-
-# Pwd
-__dir__ = os.path.dirname(os.path.realpath(__file__))
-
-# Given that we can 'require' other DNA files, we need to keep a stack of
-# open DNA files. We also keep the name of the file and the line number to
-# be able to report errors. We'll also keep track of the directory the DNA file
-# is in to be able to correctly expand relative paths in /!include commands.
-dnastack = [(None, 'ribosome.py', PROLOGUE_LINE + 1, __dir__)]
-
-# Handle to output stream
-rna = None
-
-# Line counter
-rnaln = 1
-
-# Lines
-linemap = []
-
-# DNA helper functions
-def dnaerror(s):
-    print("%s:%s - %s" %(dnastack[-1][1], dnastack[-1][2], s), file=sys.stderr)
-
-# Generate new line(s) into the RNA file.
-def rnawrite(s):
-    global rnaln
-    global dnastack
-    linemap.append([rnaln, dnastack[-1][1], dnastack[-1][2]])
-    rna.write(s)
-    rnaln += len(s.splitlines())
-
-args = parser.parse_args()
-
-# Handle the CLI arguments.
-if args.rna:
-    rna = sys.stdout
-
-else:
-    name, ext = os.path.splitext(args.dna.name)
-    rnafile = name + '.rna'
-    rna = open(rnafile, 'w')
-
-# Generate RNA Prologue code
-rnawrite(PROLOGUE)
-if not args.rna:
-    rnawrite('try:\n')
-
-# Process the DNA file.
-dirname = os.path.dirname(os.path.realpath(args.dna.name))
-dnastack.append([args.dna, args.dna.name, 0, dirname])
-
-while True:
-
-    # Get the next line. Unwind the include stack as necessary.
-    line = None
-    while True:
-        line = dnastack[-1][0].readline()
-        if line != '': break
-        dnastack.pop()[0].close()
-        if len(dnastack) == 1: break
-
-    if line == '': break
-
-    # we are counting lines so we can report line numbers in errors
-    dnastack[-1][2] += 1
-
-
-    # @alixedi - Now that we are doing this in Python, we must have some way
-    # of dealing with indentation - for instance, this does not work:
-    # for i in [1, 2, 3]:
-    # .    @{i}
-    # Neither does this work:
-    # for i in [1, 2, 3]:
-    #     .@{i}
-    # I want to be able to support the former.
-
-    # Lets save the left and right spaces, if any
-    lspace = line.replace(line.lstrip(), '')
-    # Add 4 spaces to accommodate our try except clause if not rna
-    if not args.rna:
-        lspace = lspace + ' ' * 4
-    rspace = line.replace(line.rstrip(), '')
-    # followed by stripping the line
-    line = line.strip()
-
-    # All Python lines are copies to the RNA file verbatim
-    if len(line) == 0 or not line[0] in ['.']:
-        rnawrite(lspace + line + rspace)
-        continue
-
-    # Removes dot from the beginning of the line and 
-    # trailing $ sign, if present.
-    line = line[1:]
-
-    if len(line) > 0:
-        if line[-1] == '$': line = line[0:-1]
-
-    # Make sure there are no tabs in the line
-    if not line.find('\t') == -1:
-        dnaerror('tab found in the line, replace it by space')
-
-    # Find first two non-whitespace which can possibly form a command.
-    try:
-        firsttwo = line.lstrip()[0:2]
-    except:
-        firsttwo = None
-
-    # /+ means that the line is appended to the previous line.
-    if firsttwo == '/+':
-        rnawrite('''%sBlock.add('%s', locals())%s''' % (lspace, line.lstrip()[2:], rspace))
-
-    # /= means that the lines is aligned with the previous line.
-    elif firsttwo == '/=':
-        rnawrite('''%sBlock.align('%s', locals())%s''' % (lspace, line.lstrip()[2:], rspace))
-
-    # /! means a command follows.
-    elif firsttwo == '/!':
-        line = line.lstrip()[2:]
-        match = re.match(r'^[0-9A-Za-z_]+', line)
-        if match == None:
-            dnaerror('/! should be followed by an identifier')
-        command = match.group(0)
-
-        # A subset of commands is simply translated to corresponding
-        # commands in the RNA file.
-        if command in ['output', 'append', 'stdout', 'tabsize']:
-            rnawrite('%sBlock.%s%s' % (lspace, line, rspace))
-            continue
-
-        # The argument string will be added at the end of each integration of
-        # the following loop, except for the last one.
-        if command == 'separate':
-            identity = lambda x: x
-            separator = eval('identity(%s)' % line[8:])
-            cname = "____separate_%d____" % rnaln
-            rnawrite('%s%s = True%s' % (lspace, cname, rspace))
-            line = dnastack[-1][0].readline()
-            dnastack[-1][2] += 1
-            if line == None or line[0] == '.' \
-                            or (not 'for' in line and not 'while' in line):
-                dnaerror('"separate" command must be followed by a loop')
-            rnawrite(lspace + line + rspace)
-            rnawrite('%s    if %s:%s' % (lspace, cname, rspace))
-            rnawrite('%s        %s = False%s' % (lspace, cname, rspace))
-            rnawrite('%s    else:%s' % (lspace, rspace))
-            rnawrite('%s        Block.add("%s", locals())%s' % (lspace, separator, rspace))
-            continue
-
-        # Open the file and put it on the top of the DNA stack. Relative paths
-        # are expanded using the directory the parent DNA file resides in as
-        # a starting point.
-        if command == 'include':
-            identity = lambda x: x
-            filename = eval('identity(%s)' % line[7:])
-            filename = os.path.join(dnastack[-1][3], filename)
-            dirname = os.path.dirname(filename)
-            dnastack.append([open(filename, 'r'), filename, 0, dirname])
-            continue
-
-        dnaerror('unknown command %s' % command)
-
-    else:
-        # There's no command in the line. Process it in the standard way.
-        rnawrite("""%sBlock.dot(%s, locals())%s""" % (lspace, repr(line), rspace))
-
-# Generate RNA epilogue code.
-dnastack = [[None, 'ribosome', __line__() + 1]]
-rna.write('\n')
-if not args.rna:
-    rna.write('except Exception as e:\n')
-    rna.write('    LINEMAP = [\n')
-    last = None
-    for le in linemap:
-        if (last == None) or \
-           (le[1] != last[1]) or \
-           ((le[0] - last[0]) != (le[2] - last[2])):
-            rna.write('        [%s, "%s", %s],\n' % (le[0], le[1], le[2]))
-            last = le
-    rna.write('        [None]\n')
-    rna.write('    ]\n')
-    rna.write('    Block.rethrow(e, "%s", LINEMAP)' % rnafile)
-    rna.write('\n')
-
-rna.write("\n")
-rna.write("Block.close()\n")
-
-# Flush the RNA file.
-rna.close()
-
-if not args.rna:
-    import subprocess
-    # Execute the RNA file. Pass it any arguments not used by ribosome.
-    subprocess.call([sys.executable, rnafile] + sys.argv[2:])
-    # Delete the RNA file.
-    os.remove(rnafile)
+if __name__ == '__main__':
+    # Set up the arguments parser.
+    import argparse
+    parser = argparse.ArgumentParser(prog="ribosome code generator, version 1.16")
+    parser.add_argument('dna', type=argparse.FileType('r'), default=sys.stdin)
+    args = parser.parse_args()
+    runfile(args.dna)
 
