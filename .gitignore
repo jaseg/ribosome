@@ -10,3 +10,5 @@ examples/errno.h
 examples/strerror.c
 
 tests/*.log
+tests/*.out
+tests/*.err
