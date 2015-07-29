@@ -74,7 +74,7 @@ class Document:
     def align(self, *line):
         """ Like dot, but left-align content with previous line """
         indent = ' '*max(re.match('[\s]*', l).end() for l in self.cur)
-        self.dot(*( indent+l for l in line))
+        self.dot(*( indent+l for l in line ))
 
     # Output control
     def write(self):
@@ -96,23 +96,28 @@ def separate(sep, sid, add):
         add(sep)
 
             
-def include(file_or_name, warnctx=lambda:None):
+def include(file_or_name, _globals=None):
     """ Include another DNA document
 
     This document will have access to any local variables and functions from the including document. The including
     document, in turn, will **NOT** have access to anything locally declared in the included document.
     """
+    includefile = open(file_or_name, 'r') if isinstance(file_or_name, str) else file_or_name
+
     caller_f = inspect.currentframe().f_back
-    filename = caller_f.f_locals['_filename']
+    _globals = _globals or caller_f.f_globals.copy()
+    filename, warnctx = _globals['_filename'], _globals['_warnctx']
     lineno = caller_f.f_lineno
     def newwarnctx():
         warnctx(s)
         print('At {}:{}'.format(filename, lineno), file=sys.stderr)
-    includefile = open(file_or_name, 'r') if isinstance(file_or_name, str) else file_or_name
+
+    _globals.update({ '_filename': includefile.name, '_warnctx': newwarnctx })
+
     with includefile as f:
         tree = parse_lines(includefile.name, includefile.readlines(), newwarnctx)
         code = compile(tree, includefile.name, 'exec')
-        exec(code, globals(), inspect.currentframe().f_back.f_locals)
+        exec(code, _globals)
 
 def parse_lines(filename, lines, warnctx):
     def warn(s):
@@ -216,22 +221,28 @@ def runfile(f):
         _doc.close()
         _doc = Document(f)
 
-    add    = lambda *line: _doc.add(*line)
-    dot    = lambda *line: _doc.dot(*line)
-    align  = lambda *line: _doc.align(*line)
-    close  = lambda: _doc.close()
-    stdout = lambda: redirect(sys.stdout)
-    stderr = lambda: redirect(sys.stderr)
-    output = lambda filename: redirect(open(filename, "w"))
-    append = lambda filename: redirect(open(filename, "a"))
-
     def tabsize(ts):
         _doc.tabsize = ts
 
-    _filename = '<ribosome>',
+    _globals = globals().copy()
+    _globals.update({
+        '_filename': '<ribosome>',
+        '_warnctx' : lambda: None,
+        '_doc'     : _doc,
+        'redirect' : redirect,
+        'tabsize'  : tabsize,
+        'add'      : lambda *line: _doc.add(*line),
+        'dot'      : lambda *line: _doc.dot(*line),
+        'align'    : lambda *line: _doc.align(*line),
+        'close'    : lambda: _doc.close(),
+        'stdout'   : lambda: redirect(sys.stdout),
+        'stderr'   : lambda: redirect(sys.stderr),
+        'output'   : lambda filename: redirect(open(filename, "w")),
+        'append'   : lambda filename: redirect(open(filename, "a")) })
 
-    include(f)
-    close()
+
+    include(f, _globals)
+    _doc.close()
 
 DEBUG = False
 if __name__ == '__main__':
