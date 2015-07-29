@@ -1,7 +1,4 @@
 #!/usr/bin/env python
-
-from __future__ import print_function, division
-
 #
 # Copyright (c) 2015 Ali Zaidi  All rights reserved.
 #
@@ -23,6 +20,8 @@ from __future__ import print_function, division
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 #
+
+from __future__ import print_function, division
 
 import os
 import re
