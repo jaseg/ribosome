@@ -20,3 +20,9 @@ end
 for i in 1..5
 ./+@{f1()}
 end
+
+.
+./!separate ","
+for i in 1..5
+./+@{i}
+end
