@@ -4,16 +4,16 @@ def f1():
     return "1\n" \
     "2"
 
-./!separate(",")
 for i in [1, 2, 3, 4, 5]:
+    ./!separate(",")
     ./+@{i}
 
 .
-./!separate(",")
 for i in [1, 2, 3, 4, 5]:
+    ./!separate(",")
     pass
 
 .
-./!separate(",")
 for i in [1, 2, 3, 4, 5]:
+    ./!separate(",")
     ./+@{f1()}

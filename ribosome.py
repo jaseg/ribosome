@@ -33,9 +33,8 @@ import unicodedata
 
 line = lambda level=1: inspect.stack()[level][2]
 templ = lambda s, level=1: s.format(**inspect.stack()[level][0].f_locals)
-dnacontext = lambda: inspect.currentframe().f_back.f_back.f_locals
-contextvar = lambda s: dnacontext[s]
 tabcollate = lambda s, ts: re.sub('^( {'+str(ts)+'})*', lambda m: '\t'*(m.end()//ts), s)
+caller_filename = lambda: inspect.currentframe().f_back.f_back.f_globals['_filename']
 
 
 class Document:
@@ -85,15 +84,6 @@ class Document:
         self.write()
         self.out.write('\n')
         self.out.close()
-
-
-_separate_state = {}
-def separate(sep, sid, add):
-    global _separate_state
-    if not _separate_state.get(sid):
-        _separate_state[sid] = True
-    else:
-        add(sep)
 
             
 def include(file_or_name, _globals=None):
@@ -181,33 +171,8 @@ def parse_lines(filename, lines, warnctx):
         print('GENERATED:')
         print('\n'.join(code))
         print('---')
-    tree = ast.parse('\n'.join(code), filename)
+    return ast.parse('\n'.join(code), filename)
 
-    # Fix up generated AST for "separate" commands
-    # from _ast import * does not work in python2
-    done = []
-    for node in ast.walk(tree):
-        for val in node.__dict__.values():
-            if type(val) is list:
-                indices = [i for i,e in enumerate(val) if
-                        type(e) is _ast.Expr and
-                        type(e.value) is _ast.Call and
-                        type(e.value.func) is _ast.Name and
-                        e.value.func.id == 'separate']
-                for idx in reversed(indices):
-                    sepcall, loop = val[idx], val[idx+1]
-                    if sepcall in done:
-                        continue #FIXME dirty hack
-                    if type(loop) not in (_ast.For, _ast.While, _ast.FunctionDef):
-                        warn('"separate" command must be followed by loop or function definition.')
-                        continue
-                    sepcall.value.args.append(ast.Str('{}:{}'.format(filename, idx)))
-                    sepcall.value.args.append(ast.Name('add', ast.Load()))
-                    ast.fix_missing_locations(sepcall)
-                    loop.body = [sepcall] + loop.body
-                    done.append(sepcall)
-                    del val[idx]
-    return tree
 
 # Escape sequences
 at    = '@'
@@ -224,6 +189,14 @@ def runfile(f):
     def tabsize(ts):
         _doc.tabsize = ts
 
+    _separate_state = {}
+    def separate(sep):
+        sid = caller_filename() +':'+ str(line(2))
+        if not _separate_state.get(sid):
+            _separate_state[sid] = True
+        else:
+            _doc.add(sep)
+
     _globals = globals().copy()
     _globals.update({
         '_filename': '<ribosome>',
@@ -231,6 +204,7 @@ def runfile(f):
         '_doc'     : _doc,
         'redirect' : redirect,
         'tabsize'  : tabsize,
+        'separate' : separate,
         'add'      : lambda *line: _doc.add(*line),
         'dot'      : lambda *line: _doc.dot(*line),
         'align'    : lambda *line: _doc.align(*line),
@@ -239,7 +213,6 @@ def runfile(f):
         'stderr'   : lambda: redirect(sys.stderr),
         'output'   : lambda filename: redirect(open(filename, "w")),
         'append'   : lambda filename: redirect(open(filename, "a")) })
-
 
     include(f, _globals)
     _doc.close()
