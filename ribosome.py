@@ -31,206 +31,60 @@ import ast, _ast
 import inspect
 import unicodedata
 
-line = lambda: inspect.currentframe().f_back.f_lineno
+line = lambda level=1: inspect.stack()[level][2]
 templ = lambda s, level=1: s.format(**inspect.stack()[level][0].f_locals)
+dnacontext = lambda: inspect.currentframe().f_back.f_back.f_locals
+contextvar = lambda s: dnacontext[s]
+tabcollate = lambda s, ts: re.sub('^( {'+str(ts)+'})*', lambda m: '\t'*(m.end()//ts), s)
 
 
-#################
-# Prologue code #
-#################
+class Document:
+    """ Text document that supports multi-line expansion in append functions.
 
-class Block:
-    # Block represents a rectangular area of text.
+    All public manipulation functions accept a list of line chunks that are stuck to each other like this:
+      [-----] [-chunk 2-] [---chunk 3----] [-chunk-]
+      |chunk| [---------]                  |   4   |
+      |  1  |                              [-------]
+      [-----]
+    Each chunk may by itself contain multiple lines.
+    """
 
-    def __init__(self, s):
-        self.text = ['']
-        self.width = 0
-        if len(s) > 0:
-            self.text = s.splitlines()
-            self.width = max(map(lambda x: len(x), self.text))
+    def __init__(self, out=sys.stdout, s='', tabsize=0):
+        self.text = []
+        self.cur = s.splitlines()
+        self.out = out
+        self.tabsize = tabsize
 
-    # Weld the supplied block to the right of this block
-    def add_right(self, block):
-        for i, l in enumerate(block.text):
-            try:
-                self.text[i] += ' ' * (self.width - len(self.text[i])) + l
-            except:
-                self.text.append((' ' * self.width) + l)
-        self.width += block.width
+    def _add_elem(self, *elines):
+        w = max(len(l) for l in self.cur or [''])
+        d = len(elines)-len(self.cur) # to pad cur and line to equal lengths
+        self.cur = [c.ljust(w)+l for c,l in zip(self.cur+['']*max(d, 0), elines+('',)*max(-d, 0))]
 
-    # Weld the supplied block to the bottom of this block
-    def add_bottom(self, block):
-        self.text += block.text
-        self.width = max([self.width, block.width])
+    def add(self, *line):
+        """ Weld the supplied block to the right of the current block """
+        for elem in line:
+            self._add_elem(*(elem.splitlines() or ['']))
 
-    # Trim the whitespace from the block
-    def trim(self):
-        top = bottom = left = right = -1
-        for i, l in enumerate(self.text):
-            if not l.strip() == '':
-                # line is not empty
-                if top == -1: top = i
-                bottom = i
-                ls = len(l) - len(l.lstrip())
-                left = ls if left == -1 else min([left, ls])
-                rs = len(l.rstrip())
-                right = rs if right == -1 else max([right, rs])
-        if bottom == -1:
-            # empty block
-            self.text = ['']
-            self.width = 0
-        # Strip off the top and bottom whitespace.
-        self.text = self.text[top:bottom+1]
-        # Strip off the whitespace on the left and on the right.
-        self.text = [l.rstrip()[left:right+1] for l in self.text]
-        # Adjust the overall width of the block.
-        self.width = max([len(l) for l in self.text])
-        
-    def write(self, out, tabsize):
-        for l in self.text:
-            # If required, replace the initial whitespace by tabs.
-            if tabsize > 0:
-                ws = len(l) - len(l.lstrip())
-                l = '\t' * (ws // tabsize) + ' ' * (ws % tabsize) + l.lstrip()
-            # Write an individual line to the output file.
-            out.write(l+'\n')
+    def dot(self, *line):
+        """ Weld the supplied block to the bottom of the current block """
+        self.text += self.cur
+        self.cur = []
+        self.add(*line)
 
-    # Returns offset of the last line in block
-    def last_offset(self):
-        if len(self.text) == 0: return 0
-        return len(self.text[-1]) - len(self.text[-1].lstrip())
+    def align(self, *line):
+        """ Like dot, but left-align content with previous line """
+        indent = ' '*max(re.match('[\s]*', l).end() for l in self.cur)
+        self.dot(*( indent+l for l in line))
 
-    # Size of a tab. If set to zero, tabs are not generated.
-    _tabsize = 0
+    # Output control
+    def write(self):
+        self.dot()
+        self.out.write('\n'.join(tabcollate(line, self.tabsize) if self.tabsize else line for line in self.text))
 
-    # The output file, or, alternatively, stdout.
-    out = sys.stdout
-
-    # This is ribosome call stack. At each level there is a list of
-    # text blocks generated up to that point.
-    stack = [[]]
-
-    # Redirects output to the specified file.
-    @staticmethod
-    def output(filename):
-        Block.close()
-        Block.out = open(filename, "w")
-    
-    # Redirects output to the specified file.
-    # New stuff is added to the existing content of the file.
-    @staticmethod
-    def append(filename):
-        Block.close()
-        Block.out = open(filename, "a")
-
-    # Redirect output to the stdout.
-    @staticmethod
-    def stdout():
-        Block.close()
-        Block.out = sys.stdout
-
-    # Sets the size of the tab
-    @staticmethod
-    def tabsize(size):
-        Block._tabsize = size
-
-    # Flush the data to the currently open file and close it.
-    @staticmethod
-    def close():
-        for b in Block.stack[-1]:
-            b.write(Block.out, Block._tabsize)
-        Block.stack = [[]]
-        if Block.out is not sys.stdout:
-            Block.out.close()
-
-    # Adds one . line from the DNA file.
-    @staticmethod
-    def add(line, bind=None):
-
-        # If there is no previous line, add one.
-        if(len(Block.stack[-1]) == 0):
-            Block.stack[-1].append(Block(''))
-
-        # In this block we will accumulate the expanded line.
-        block = Block.stack[-1][-1]
-
-        # Traverse the line and convert it into a block.
-        i = 0
-        while True:
-            j = re.search(r'[@&][1-9]?\{', line[i:])
-            j = len(line) if j == None else j.start()+i
-
-            # Process constant blocks of text.
-            if i != j:
-                block.add_right(Block(line[i:j]))
-
-            if len(line) == j: break
-
-            # Process an embedded expression
-            i = j
-            j += 1
-            level = 0
-            if line[j] in [str(x) for x in range(1, 10)]:
-                level = int(line[j])
-                j += 1
-            # Find corresponding }.
-            par = 0
-            while True:
-                if line[j] == '{':
-                    par += 1
-                elif line[j] == '}':
-                    par -= 1
-                if par == 0: break
-                j += 1
-                if j >= len(line):
-                    raise Exception('Unmatched {')
-       
-            # Expression of higher indirection levels are simply brought
-            # down by one level.
-            if level > 0:
-                if line[i+1] == '1':
-                    block.add_right(Block('@' + line[(i+2):(j+1)]))
-                else:
-                    ll = list(line)
-                    ll[i+1] = str(int(ll[i+1]) - 1)
-                    line = ''.join(ll)
-                    block.add_right(Block(line[i:(j+1)]))
-                i = j + 1
-                continue
-            # We are at the lowest level of embeddedness so we have to
-            # evaluate the embedded expression straight away.
-            idx = i+2 if level == 0 else i+3
-            expr = line[idx:j]
-            Block.stack.append([])
-            val = eval(expr, globals(), bind or inspect.currentframe().f_back.f_locals)
-            top = Block.stack.pop()
-            if len(top) == 0:
-                val = Block(str(val))
-            else:
-                val = Block("")
-                for b in top:
-                    val.add_bottom(b)
-            if line[i] == '@': val.trim()
-            block.add_right(val)
-            i = j + 1
-    
-    # Adds newline followed by one . line from the DNA file.
-    @staticmethod
-    def dot(line, bind=None):
-        Block.stack[-1].append(Block(''))
-        Block.add(line, bind or inspect.currentframe().f_back.f_locals)
-
-    # Adds newline followed by leading whitespaces copied from the previous line
-    # and one line from the DNA file.
-    @staticmethod
-    def align(line, bind=None):
-        if len(Block.stack[-1]) == 0:
-            n = 0
-        else:
-            n = Block.stack[-1][-1].last_offset()
-        Block.stack[-1].append(Block(''))
-        Block.add(' ' * n, None)
-        Block.add(line, bind or inspect.currentframe().f_back.f_locals)
+    def close(self):
+        self.write()
+        self.out.write('\n')
+        self.out.close()
 
 
 _separate_state = {}
@@ -242,64 +96,73 @@ def separate(sep, sid, add):
         add(sep)
 
             
-def include(file_or_name, warnctx=None, glo=None):
+def include(file_or_name, warnctx=lambda:None):
+    """ Include another DNA document
+
+    This document will have access to any local variables and functions from the including document. The including
+    document, in turn, will **NOT** have access to anything locally declared in the included document.
+    """
     caller_f = inspect.currentframe().f_back
-    filename = caller_f.f_locals['filename']
+    filename = caller_f.f_locals['_filename']
     lineno = caller_f.f_lineno
     def newwarnctx():
-        if warnctx:
-            warnctx(s)
+        warnctx(s)
         print('At {}:{}'.format(filename, lineno), file=sys.stderr)
-    includefile = open(file_or_name, 'r') if type(file_or_name) is str else file_or_name
-    glo = glo or caller_f.f_locals['glo'] #FIXME dirty hack
+    includefile = open(file_or_name, 'r') if isinstance(file_or_name, str) else file_or_name
     with includefile as f:
         tree = parse_lines(includefile.name, includefile.readlines(), newwarnctx)
         code = compile(tree, includefile.name, 'exec')
-        exec(code, glo, inspect.currentframe().f_back.f_locals)
+        exec(code, globals(), inspect.currentframe().f_back.f_locals)
 
 def parse_lines(filename, lines, warnctx):
     def warn(s):
-        # We are not using nonlocal here for python2 compatibility
-        caller_f = inspect.currentframe().f_back
-        filename = caller_f.f_locals['filename']
-        lineno = caller_f.f_lineno
-        rawline = caller_f.f_locals['rawline']
         warnctx()
-        print('From {}:{}'.format(__file__, inspect.currentframe().f_back.f_lineno), file=sys.stderr)
+        print('From {}:{}'.format(__file__, line(2)), file=sys.stderr)
         print(templ(s, 2), file=sys.stderr)
         print('> '+rawline, file=sys.stderr)
 
     code = []
     for lineno,rawline in enumerate(lines):
-        indent,     dot,     shortcmd,    line,   rspace,     dollar = re.match(
+        indent,     dot,     shortcmd,    line,    rspace,     dollar = re.match(
         r'^([\s]*)'+r'(\.?)'+r'(/[+=!])?'+r'(.*?)'+r'([\s]*?)'+r'(\$?)\n?$', rawline).groups()
-
-        # @alixedi - Now that we are doing this in Python, we must have some way
-        # of dealing with indentation - for instance, this does not work:
-        # for i in [1, 2, 3]:
-        # .    @{i}
-        # Neither does this work:
-        # for i in [1, 2, 3]:
-        #     .@{i}
-        # I want to be able to support the former.
 
         if rspace and not dollar:
             warn('Trailing space in line not dollar-terminated')
 
         if '\t' in rawline:
-            # Tabs may cause issues with python's indentation processing
-            warn('Line contains tabs. Consider using spaces instead.')
+            warn("Line contains tabs. For consistent results, consider using spaces.")
 
         if not dot:
-            code.append(rawline)
+            code.append(rawline.rstrip('\n'))
             continue
 
+        def repl(s):
+            m = re.search(r'([@&])0?([1-9]?)\{', s)
+            if not m:
+                return repr(s)
+            start,end, = m.span()
+            op, ncount = m.groups()
+            lvl = 1
+            for b in re.finditer('[{}]', s[end:]):
+                lvl += 1 if b.group(0) == '{' else -1
+                if lvl == 0:
+                    if ncount:
+                        if ncount != '1':
+                            s = s[:m.end()-2] + str(int(ncount)-1) + s[m.end()-1:]
+                        else:
+                            s = s[:m.end()-2] + s[m.end()-1:]
+                        return repr(s[:end+b.end()]) + repl(s[end+b.end():])
+                    else:
+                        return ', '.join([ repr(s[:start]),
+                            ("str({}).strip()" if op == '@' else "str({})").format(s[end:end+b.start()])
+                            , repl(s[end+b.end():]) ])
+
         if not shortcmd:
-            cmd, args = 'dot', repr(line)
+            cmd, args = 'dot', repl(line)
         elif shortcmd == '/+': # Append the line to the previous line.
-            cmd, args = 'add', repr(line)
+            cmd, args = 'add', repl(line)
         elif shortcmd == '/=': # /= Align the line with the previous line.
-            cmd, args = 'align', repr(line)
+            cmd, args = 'align', repl(line)
         else:
             m = re.match(r'(^[0-9A-Za-z_]+)\((.*)\)$', line)
             if not m:
@@ -309,6 +172,10 @@ def parse_lines(filename, lines, warnctx):
             cmd, args = m.groups()
         code.append(templ('{indent}{cmd}({args})'))
 
+    if DEBUG:
+        print('GENERATED:')
+        print('\n'.join(code))
+        print('---')
     tree = ast.parse('\n'.join(code), filename)
 
     # Fix up generated AST for "separate" commands
@@ -343,27 +210,37 @@ amp   = '&'
 slash = '/'
 
 def runfile(f):
-    glo = globals().copy()
-    glo.update({
-        'output':  Block.output,
-        'append':  Block.append,
-        'stdout':  Block.stdout,
-        'tabsize': Block.tabsize,
-        'close':   Block.close,
-        'add':     Block.add,
-        'dot':     Block.dot,
-        'align':   Block.align})
-    
-    filename = '<ribosome>'
-    lineno = 0
-    include(f, glo=glo)
-    Block.close()
+    _doc = Document()
 
+    def redirect(f):
+        _doc.close()
+        _doc = Document(f)
+
+    add    = lambda *line: _doc.add(*line)
+    dot    = lambda *line: _doc.dot(*line)
+    align  = lambda *line: _doc.align(*line)
+    close  = lambda: _doc.close()
+    stdout = lambda: redirect(sys.stdout)
+    stderr = lambda: redirect(sys.stderr)
+    output = lambda filename: redirect(open(filename, "w"))
+    append = lambda filename: redirect(open(filename, "a"))
+
+    def tabsize(ts):
+        _doc.tabsize = ts
+
+    _filename = '<ribosome>',
+
+    include(f)
+    close()
+
+DEBUG = False
 if __name__ == '__main__':
     # Set up the arguments parser.
     import argparse
     parser = argparse.ArgumentParser(prog="ribosome code generator, version 1.16")
     parser.add_argument('dna', type=argparse.FileType('r'), default=sys.stdin)
+    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
+    DEBUG = args.debug
     runfile(args.dna)
 
