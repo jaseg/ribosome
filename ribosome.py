@@ -166,10 +166,6 @@ def parse_lines(filename, lines, warnctx):
             cmd, args = m.groups()
         code.append(templ('{indent}{cmd}({args})'))
 
-    if DEBUG:
-        print('GENERATED:')
-        print('\n'.join(code))
-        print('---')
     return ast.parse('\n'.join(code), filename)
 
 
@@ -216,14 +212,11 @@ def runfile(f):
     include(f, _globals)
     _doc.close()
 
-DEBUG = False
 if __name__ == '__main__':
     # Set up the arguments parser.
     import argparse
     parser = argparse.ArgumentParser(prog="ribosome code generator, version 1.16")
     parser.add_argument('dna', type=argparse.FileType('r'), default=sys.stdin)
-    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
-    DEBUG = args.debug
     runfile(args.dna)
 
